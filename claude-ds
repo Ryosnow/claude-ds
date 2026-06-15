@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# claude-ds — DeepSeek 一体化命令
+#
+# 子命令:
+#   claude-ds                启动菜单栏余额窗口（若未运行）+ 进入 Claude Code（DeepSeek 后端）
+#   claude-ds usage          仅启动/聚焦菜单栏余额窗口
+#   claude-ds balance        在终端查询并打印一次余额
+#   claude-ds stop-usage     退出菜单栏余额窗口
+#   claude-ds doctor         自检：环境、依赖、API Key、Claude Code 是否就绪
+#   claude-ds update         更新 vendor/deepclaude（git pull）
+#   claude-ds help|-h        显示本帮助
+#
+# 透传：除上面列出的子命令外，其它参数直接透传给 deepclaude.sh
+#   claude-ds --status              -> deepclaude --status
+#   claude-ds --backend or          -> deepclaude --backend or
+#   claude-ds --cost                -> deepclaude --cost
+#
+# 配置:
+#   API Key 优先级: $DEEPSEEK_API_KEY > ~/.config/deepseek/api_key > ~/.config/deepseek/token
+#   读取到后会自动 export DEEPSEEK_API_KEY 给 deepclaude 使用。
+
+set -euo pipefail
+
+# ---------- 路径 ----------
+# 解析自身真实路径（处理软链）
+SELF="$0"
+while [ -h "$SELF" ]; do
+    LINK="$(readlink "$SELF")"
+    case "$LINK" in
+        /*) SELF="$LINK" ;;
+        *)  SELF="$(dirname "$SELF")/$LINK" ;;
+    esac
+done
+ROOT="$(cd "$(dirname "$SELF")" && pwd)"
+
+USAGE_APP="${ROOT}/DeepSeekUsage/DeepSeekUsage.app"
+USAGE_CLI="${ROOT}/deepseek_usage.sh"
+DEEPCLAUDE_SH="${ROOT}/vendor/deepclaude/deepclaude.sh"
+API_KEY_FILE="${HOME}/.config/deepseek/api_key"
+LEGACY_TOKEN_FILE="${HOME}/.config/deepseek/token"
+
+# ---------- 颜色 ----------
+if [ -t 1 ]; then
+    C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+    C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'; C_CYAN=$'\033[36m'
+else
+    C_RESET=''; C_DIM=''; C_BOLD=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_CYAN=''
+fi
+ok()    { echo "${C_GREEN}✓${C_RESET} $*"; }
+info()  { echo "${C_CYAN}ℹ${C_RESET} $*"; }
+warn()  { echo "${C_YELLOW}⚠${C_RESET} $*" >&2; }
+err()   { echo "${C_RED}✗${C_RESET} $*" >&2; }
+
+# ---------- 加载并 export API Key ----------
+load_api_key() {
+    if [ -n "${DEEPSEEK_API_KEY:-}" ]; then return 0; fi
+    if [ -f "$API_KEY_FILE" ]; then
+        DEEPSEEK_API_KEY="$(tr -d ' \n\r' < "$API_KEY_FILE")"
+        [ -n "$DEEPSEEK_API_KEY" ] && export DEEPSEEK_API_KEY && return 0
+    fi
+    if [ -f "$LEGACY_TOKEN_FILE" ]; then
+        local k
+        k="$(tr -d ' \n\r' < "$LEGACY_TOKEN_FILE")"
+        if [ -n "$k" ] && [[ "$k" == sk-* ]]; then
+            export DEEPSEEK_API_KEY="$k"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+require_api_key() {
+    if ! load_api_key; then
+        err "未配置 DeepSeek API Key"
+        cat <<EOF >&2
+
+请先到 https://platform.deepseek.com/api_keys 创建 API Key（sk- 开头），然后任选一种方式配置：
+
+  方式 1（推荐）：
+    mkdir -p ~/.config/deepseek
+    echo 'sk-xxxxxxxx' > $API_KEY_FILE
+    chmod 600 $API_KEY_FILE
+
+  方式 2（临时）：
+    export DEEPSEEK_API_KEY='sk-xxxxxxxx'
+
+EOF
+        exit 1
+    fi
+}
+
+# ---------- 菜单栏 App 控制 ----------
+is_usage_running() {
+    pgrep -x DeepSeekUsage >/dev/null 2>&1
+}
+
+start_usage() {
+    if [ ! -d "$USAGE_APP" ]; then
+        err "未找到 $USAGE_APP"
+        info "可执行 ${C_BOLD}cd ${ROOT}/DeepSeekUsage && ./build.sh${C_RESET} 重新构建"
+        return 1
+    fi
+    if is_usage_running; then
+        # 已运行，激活窗口（让用户看到）
+        open "$USAGE_APP"
+        ok "菜单栏余额窗口已在运行"
+    else
+        open "$USAGE_APP"
+        ok "已启动菜单栏余额窗口"
+    fi
+}
+
+stop_usage() {
+    if is_usage_running; then
+        pkill -x DeepSeekUsage 2>/dev/null || true
+        ok "已退出菜单栏余额窗口"
+    else
+        info "菜单栏余额窗口未运行"
+    fi
+}
+
+# ---------- 检查 Claude Code ----------
+check_claude_code() {
+    if command -v claude >/dev/null 2>&1; then
+        return 0
+    fi
+    err "未检测到 Claude Code (claude 命令不存在)"
+    cat <<'EOF' >&2
+
+安装方式（需要 Node.js 18+）：
+
+  npm install -g @anthropic-ai/claude-code
+
+如果没有 Node.js，先用 Homebrew 装：
+
+  brew install node
+
+安装后重新打开终端，再次运行 claude-ds。
+
+EOF
+    return 1
+}
+
+# ---------- 自检 ----------
+doctor() {
+    echo "${C_BOLD}claude-ds 自检${C_RESET}"
+    echo "${C_DIM}—————————————————————————————${C_RESET}"
+
+    # 1. claude
+    if command -v claude >/dev/null 2>&1; then
+        ok "Claude Code: $(claude --version 2>/dev/null | head -1)"
+    else
+        err "Claude Code 未安装。运行: npm install -g @anthropic-ai/claude-code"
+    fi
+
+    # 2. API Key
+    if load_api_key; then
+        local masked="****${DEEPSEEK_API_KEY: -4}"
+        ok "DEEPSEEK_API_KEY: 已配置 ($masked)"
+    else
+        err "DEEPSEEK_API_KEY: 未配置"
+    fi
+
+    # 3. 菜单栏 App
+    if [ -d "$USAGE_APP" ]; then
+        ok "菜单栏 App 已构建: $USAGE_APP"
+        if is_usage_running; then
+            ok "  → 当前正在运行"
+        else
+            info "  → 当前未运行（claude-ds usage 启动）"
+        fi
+    else
+        warn "菜单栏 App 未构建：cd ${ROOT}/DeepSeekUsage && ./build.sh"
+    fi
+
+    # 4. deepclaude
+    if [ -x "$DEEPCLAUDE_SH" ]; then
+        ok "deepclaude 已 vendor: $DEEPCLAUDE_SH"
+    else
+        err "deepclaude 不存在或不可执行：$DEEPCLAUDE_SH"
+        info "  → 运行 ${C_BOLD}claude-ds update${C_RESET} 重新拉取"
+    fi
+
+    # 5. CLI 工具
+    [ -x "$USAGE_CLI" ] && ok "余额 CLI 脚本: $USAGE_CLI" || warn "余额 CLI 脚本不可执行: $USAGE_CLI"
+    command -v jq >/dev/null && ok "jq: $(jq --version)" || info "jq 未安装（可选，brew install jq 后输出更美观）"
+    command -v git >/dev/null && ok "git: $(git --version | awk '{print $3}')" || warn "git 未安装"
+
+    echo ""
+}
+
+# ---------- 更新 deepclaude ----------
+update_deepclaude() {
+    if [ ! -d "${ROOT}/vendor/deepclaude/.git" ]; then
+        warn "vendor/deepclaude 不是 git 仓库，重新克隆…"
+        rm -rf "${ROOT}/vendor/deepclaude"
+        mkdir -p "${ROOT}/vendor"
+        git clone --depth 1 https://github.com/aattaran/deepclaude.git "${ROOT}/vendor/deepclaude"
+    else
+        info "正在 git pull…"
+        ( cd "${ROOT}/vendor/deepclaude" && git pull --ff-only )
+    fi
+    chmod +x "$DEEPCLAUDE_SH" 2>/dev/null || true
+    ok "deepclaude 已更新"
+}
+
+# ---------- 帮助 ----------
+show_help() {
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# ---------- 主流程 ----------
+cmd="${1:-}"
+case "$cmd" in
+    usage)
+        start_usage
+        ;;
+    stop-usage)
+        stop_usage
+        ;;
+    balance)
+        require_api_key
+        shift || true
+        exec "$USAGE_CLI" "$@"
+        ;;
+    doctor)
+        doctor
+        ;;
+    update)
+        update_deepclaude
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    "")
+        # 默认：启动菜单栏 App + 进入 Claude Code（DeepSeek 后端）
+        require_api_key
+        check_claude_code || exit 1
+        if [ ! -x "$DEEPCLAUDE_SH" ]; then
+            err "deepclaude.sh 不可执行：$DEEPCLAUDE_SH"
+            info "运行 ${C_BOLD}claude-ds update${C_RESET} 重新拉取"
+            exit 1
+        fi
+        info "启动菜单栏余额窗口…"
+        start_usage || true
+        info "进入 Claude Code（DeepSeek V4 Pro 后端）…"
+        echo ""
+        # exec 让信号正确传递；菜单栏 App 是独立进程，不受影响
+        exec "$DEEPCLAUDE_SH"
+        ;;
+    *)
+        # 未知子命令 → 透传给 deepclaude
+        require_api_key
+        if [ ! -x "$DEEPCLAUDE_SH" ]; then
+            err "deepclaude.sh 不可执行：$DEEPCLAUDE_SH"
+            exit 1
+        fi
+        exec "$DEEPCLAUDE_SH" "$@"
+        ;;
+esac
