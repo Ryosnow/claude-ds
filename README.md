@@ -1,14 +1,15 @@
 # claude-ds — DeepSeek + Claude Code 一体化工具
 
-集成三件套，一个 `claude-ds` 命令搞定：
+集成组件，一个 `claude-ds` 命令搞定：
 
 | 组件 | 作用 |
 |------|------|
 | 🤖 **deepclaude** | 让 Claude Code 走 DeepSeek V4 Pro 后端（17× 便宜） |
 | 🖥️ **DeepSeekUsage.app** | macOS 菜单栏常驻，鼠标悬停看余额，点击展开详情 |
 | 🐚 **deepseek_usage.sh** | 命令行查询余额、自由调用 DeepSeek 官方 API |
+| ⚡ **claude-go** | 独立命令，让 Claude Code 走 OpenCode Go 的 `deepseek-v4-flash` |
 
-三者**共用同一份 API Key**：`~/.config/deepseek/api_key`
+其中前三者**共用同一份 API Key**：`~/.config/deepseek/api_key`；`claude-go` 使用自己的 `OPENCODE_API_KEY`（见下方专节）。
 
 ---
 
@@ -107,6 +108,39 @@ $ claude-ds balance post /xxx '{"foo":"bar"}'      # 自由调用任意 POST 接
 
 ---
 
+## ⚡ claude-go：OpenCode Go 后端
+
+独立组件，位于 `claude-go/`。它在本机临时启动一个仅监听 `127.0.0.1` 的协议转换服务，把 Claude Code 的 Anthropic Messages 请求转换成 OpenCode Go 的 OpenAI-compatible Chat Completions 请求，模型固定为 `deepseek-v4-flash`。退出 Claude Code 后本地服务自动关闭。
+
+唯一必填配置：
+
+```sh
+export OPENCODE_API_KEY="你的 OpenCode Go API Key"
+```
+
+安装：
+
+```sh
+chmod +x claude-go/install.sh claude-go/claude-go
+claude-go/install.sh
+```
+
+安装器默认复制到 `~/.local/bin/claude-go`（如有同名文件先创建带时间戳备份），然后：
+
+```sh
+claude-go doctor        # 自检
+claude-go -p "..."      # 参数原样透传，等价于 claude -p "..."
+claude-go --resume SESSION_ID
+```
+
+要求：Node.js 20+、已安装 `claude` 命令。API Key 只发送到 `https://opencode.ai/zen/go/v1/chat/completions`，并在启动 Claude Code 前从子进程环境移除。开发验证：
+
+```sh
+cd claude-go && npm test
+```
+
+---
+
 ## 📂 目录结构
 
 ```
@@ -123,6 +157,14 @@ deepseek-usage/
 └── vendor/
     └── deepclaude/               # 上游开源项目（git clone）
         └── deepclaude.sh
+
+claude-go/                       # OpenCode Go 后端（独立命令）
+├── README.md
+├── install.sh
+├── claude-go                    # 命令入口（node 包装）
+├── claude-go.mjs                # 协议转换服务（零第三方依赖）
+├── test/claude-go.test.mjs
+└── docs/plans/                  # 设计文档
 ```
 
 ---
@@ -173,6 +215,7 @@ A：仅本地保存（`~/.config/deepseek/api_key`，权限 600），App/脚本�
 
 ## 📜 版本
 
+- **v2.1**：新增 `claude-go`（OpenCode Go 后端，模型 `deepseek-v4-flash`）
 - **v2.0**：集成 deepclaude，新增 `claude-ds` 命令
 - v1.1：切换到 DeepSeek 官方 API（永不过期）
 - v1.0：浏览器登录态 token（已废弃）
