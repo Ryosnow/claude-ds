@@ -1,75 +1,94 @@
-# claude-ds · claude-go
+# claude-go
 
-让 Claude Code 接入 DeepSeek 系后端的一对**相互独立**的工具，按你想用的服务二选一（或都装）：
+一个命令让 Claude Code 使用任意 OpenAI 兼容后端——**不需要区分是 DeepSeek 的 API 还是 OpenCode Go 的 API**，它们都是配置文件里的一条模型档案。
 
-| | 🤖 **claude-ds** | ⚡ **claude-go** |
-|---|---|---|
-| 所在目录 | [`claude-ds/`](claude-ds/) | [`claude-go/`](claude-go/) |
-| 用的服务 | DeepSeek 官方 API | OpenCode Go 套餐 |
-| 模型 | DeepSeek V4 Pro（via [deepclaude](https://github.com/aattaran/deepclaude)） | 多模型可配置（默认 `deepseek-v4-flash`），见 `config.example.json` |
-| API Key | `DEEPSEEK_API_KEY` → `~/.config/deepseek/api_key` | `OPENCODE_API_KEY` 环境变量，或配置文件按模型指定 |
-| 额外能力 | 🖥️ macOS 菜单栏余额 App + 🐚 终端余额查询 CLI | 本地协议转换代理（零依赖、仅回环监听） |
-| 运行依赖 | bash / curl / Claude Code（菜单栏 App 需 macOS） | Node.js 20+ / Claude Code |
-| 详细文档 | [claude-ds/README.md](claude-ds/README.md) | [claude-go/README.md](claude-go/README.md) |
-
-> **怎么选？**
-> - 有 DeepSeek 官方账号、想按量付费并随时看余额 → 装 **claude-ds**
-> - 有 OpenCode Go 订阅、想要 flash 快速模型或多模型切换 → 装 **claude-go**
-> - 两者互不干扰：API Key 各自独立、命令名不同、可同时安装。
-
----
-
-## 🚀 claude-ds 使用方法
-
-```bash
-# 1. 安装（在 claude-ds/ 目录内执行）
-cd claude-ds
-./install.sh            # 自动克隆 deepclaude、构建菜单栏 App、软链到 ~/.local/bin
-
-# 2. 配置 API Key
-mkdir -p ~/.config/deepseek
-echo 'sk-你的key' > ~/.config/deepseek/api_key
-chmod 600 ~/.config/deepseek/api_key
-
-# 3. 自检 + 使用
-claude-ds doctor        # 自检环境
-claude-ds               # 菜单栏余额窗口 + 进入 Claude Code（DeepSeek 后端）
-claude-ds balance       # 仅在终端查一次余额
+```sh
+claude-go                  # 用默认模型进入 Claude Code
+claude-go --model ds-chat  # 换个模型档案
+claude-go balance          # 查 DeepSeek 账户余额
 ```
 
-更多子命令与 FAQ 见 [claude-ds/README.md](claude-ds/README.md)。
-
----
-
-## ⚡ claude-go 使用方法
-
-```bash
-# 1. 安装（在 claude-go/ 目录内执行）
-cd claude-go
-chmod +x install.sh claude-go
-./install.sh            # 复制到 ~/.local/bin/claude-go（已有同名先备份）
-
-# 2. 配置 API Key
-export OPENCODE_API_KEY="你的 OpenCode Go API Key"
-
-# 3. 自检 + 使用
-claude-go doctor        # 自检环境、显示配置的模型档案
-claude-go               # 进入 Claude Code（默认 deepseek-v4-flash 后端）
-claude-go --model pro   # 用配置文件里的 pro 档案启动
-claude-go -p "解释这个项目"   # 参数原样透传给 claude
-```
-
-多模型配置（`~/.config/claude-go/config.json`）与安全设计见 [claude-go/README.md](claude-go/README.md)。
-
----
-
-## 📂 仓库结构
+## 📂 目录结构
 
 ```
 .
-├── README.md            # 本文件：总览与选型
-├── claude-ds/           # 工具一：DeepSeek 官方后端 + 余额套件（独立安装）
-└── claude-go/           # 工具二：OpenCode Go 后端代理（独立安装）
+├── README.md                 # 本文件：总览
+├── claude-go/                # 唯一工具：多模型启动器 + 协议转换代理 + balance
+│   ├── claude-go.mjs         # 核心实现（零第三方依赖）
+│   ├── config.example.json   # 多模型配置示例
+│   ├── install.sh            # 安装到 ~/.local/bin
+│   └── test/                 # node:test 测试套件
+└── DeepSeekUsage/            # macOS 菜单栏余额 App（独立，可选）
+    ├── DeepSeekUsage.swift
+    ├── build.sh
+    └── deepseek.svg
 ```
 
-两个工具各自带有 README 与安装脚本，单独克隆任一目录也能用。
+## 🚀 快速开始
+
+### 1. 安装
+
+```sh
+cd claude-go
+chmod +x install.sh claude-go
+./install.sh              # 复制到 ~/.local/bin/claude-go（已有同名先备份）
+claude-go doctor          # 自检 Node / Claude Code / 配置
+```
+
+### 2. 写配置文件（一份配置管所有后端）
+
+```sh
+mkdir -p ~/.config/claude-go
+cp claude-go/config.example.json ~/.config/claude-go/config.json
+chmod 600 ~/.config/claude-go/config.json
+```
+
+示例：OpenCode Go 和 DeepSeek 官方各一条档案——
+
+```json
+{
+  "default": "flash",
+  "models": {
+    "flash": { "model": "deepseek-v4-flash", "api_key": "sk-你的OpenCodeGoKey" },
+    "ds-chat": {
+      "model": "deepseek-chat",
+      "base_url": "https://api.deepseek.com",
+      "api_key_file": "~/.config/deepseek/api_key"
+    }
+  }
+}
+```
+
+- `base_url` 不写 `/chat/completions` 后缀会自动补全；不写则默认 OpenCode Go 端点
+- Key 三选一：`api_key`（内联）→ `api_key_file`（文件）→ 环境变量 `OPENCODE_API_KEY`
+
+完整字段说明见 [claude-go/README.md](claude-go/README.md)。
+
+### 3. 使用
+
+```sh
+claude-go                    # 默认档案进入 Claude Code
+claude-go --model ds-chat    # 用指定档案（-m 同理；未知值原样透传给 claude）
+CLAUDE_GO_MODEL=pro claude-go
+claude-go -p "解释这个项目"   # 其余参数原样透传给 claude
+```
+
+### 4. 查余额（可选）
+
+```sh
+claude-go balance        # 终端打印 DeepSeek 账户余额
+claude-go balance --raw  # 原始 JSON
+```
+
+Key 自动读取 `DEEPSEEK_API_KEY` 或 `~/.config/deepseek/api_key`。菜单栏常驻版见 [DeepSeekUsage/](DeepSeekUsage/)（`./build.sh` 构建）。
+
+## ❓ FAQ
+
+**Q：为什么能同时支持 OpenCode Go 和 DeepSeek 官方？**
+A：两者都提供 OpenAI 兼容的 Chat Completions 接口。claude-go 在本地把 Claude Code 的 Anthropic Messages 请求转换成 OpenAI 格式，按所选档案转发到对应 `base_url` 并使用对应密钥，返回时再转换回 Anthropic 流式协议。
+
+**Q：之前装的 `claude-ds` 命令还能用吗？**
+A：已删除并替换。旧 `claude-ds`（走 deepclaude）的等价新用法是配置一条 DeepSeek 官方档案；旧 `claude-ds balance` 变成 `claude-go balance`。
+
+**Q：API Key 安全吗？**
+A：Key 只存在本地（内联在配置或独立文件），仅由父进程读取并只发送到该档案的 `base_url`；启动子进程前会从环境移除真实 Key；本地代理仅监听回环地址且使用一次性随机令牌。

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,8 +10,11 @@ import {
   DEFAULT_MODEL,
   MODEL,
   extractModelSelection,
+  fetchBalance,
   fromOpenAIResponse,
   loadConfig,
+  normalizeChatCompletionsUrl,
+  resolveDeepSeekKey,
   resolveModelProfile,
   startProxy,
   toOpenAIRequest,
@@ -320,4 +323,119 @@ exec node -e 'fetch(process.env.ANTHROPIC_BASE_URL + "/health").then(r => r.json
   assert.equal(childState.keyVisible, false);
   assert.equal(childState.model, MODEL);
   assert.equal(childState.tokenSet, true);
+});
+
+test("normalizeChatCompletionsUrl appends the chat path exactly once", () => {
+  assert.equal(
+    normalizeChatCompletionsUrl("https://api.deepseek.com"),
+    "https://api.deepseek.com/chat/completions",
+  );
+  assert.equal(
+    normalizeChatCompletionsUrl("https://api.deepseek.com/"),
+    "https://api.deepseek.com/chat/completions",
+  );
+  assert.equal(
+    normalizeChatCompletionsUrl("https://opencode.ai/zen/go/v1/chat/completions"),
+    "https://opencode.ai/zen/go/v1/chat/completions",
+  );
+  assert.equal(
+    normalizeChatCompletionsUrl("https://x.test/v1/chat/completions/"),
+    "https://x.test/v1/chat/completions",
+  );
+});
+
+test("profile api_key_file loads keys from disk and fails loudly", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "claude-go-keyfile-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const keyFile = join(directory, "api_key");
+  await writeFile(keyFile, "sk-from-file\n");
+
+  const config = {
+    models: {
+      byFile: { model: "deepseek-chat", api_key_file: keyFile },
+      missing: { api_key_file: join(directory, "absent") },
+      emptyFile: { api_key_file: join(directory, "empty") },
+    },
+  };
+  await writeFile(join(directory, "empty"), "   \n");
+
+  const profile = resolveModelProfile(config, "byFile");
+  assert.equal(profile.apiKey, "sk-from-file");
+  // base_url normalization flows through resolveModelProfile
+  assert.equal(profile.upstreamUrl, null);
+
+  assert.throws(() => resolveModelProfile(config, "missing"), /无法读取 api_key_file/);
+  assert.throws(() => resolveModelProfile(config, "emptyFile"), /内容为空/);
+
+  const withBase = resolveModelProfile({
+    models: { ds: { base_url: "https://api.deepseek.com", api_key: "inline-wins" } },
+  }, "ds");
+  assert.equal(withBase.upstreamUrl, "https://api.deepseek.com/chat/completions");
+  assert.equal(withBase.apiKey, "inline-wins");
+});
+
+test("resolveDeepSeekKey prefers env, then files, and skips legacy non-sk tokens", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "claude-go-dskey-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const fakeHome = join(directory, "home");
+  await mkdir(join(fakeHome, ".config/deepseek"), { recursive: true });
+
+  const env = { ...process.env };
+  delete env.DEEPSEEK_API_KEY;
+
+  const readWithHome = () =>
+    resolveDeepSeekKey({ env: { ...env, HOME: fakeHome } });
+
+  assert.equal(readWithHome(), null);
+
+  await writeFile(join(fakeHome, ".config/deepseek/token"), "browser-token-not-a-key");
+  assert.equal(readWithHome(), null, "legacy token file without sk- prefix must be ignored");
+
+  await writeFile(join(fakeHome, ".config/deepseek/token"), "sk-legacy");
+  assert.deepEqual(readWithHome(), {
+    source: join(fakeHome, ".config/deepseek/token"),
+    apiKey: "sk-legacy",
+  });
+
+  await writeFile(join(fakeHome, ".config/deepseek/api_key"), "sk-primary\n");
+  assert.equal(readWithHome().apiKey, "sk-primary");
+
+  const withEnv = resolveDeepSeekKey({ env: { ...env, DEEPSEEK_API_KEY: "sk-env" } });
+  assert.deepEqual(withEnv, { source: "$DEEPSEEK_API_KEY", apiKey: "sk-env" });
+});
+
+test("fetchBalance parses a mocked /user/balance response", async (t) => {
+  let auth;
+  const server = createServer((req, res) => {
+    if (req.url === "/user/balance") {
+      auth = req.headers.authorization;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        is_available: true,
+        balance_infos: [{
+          currency: "CNY",
+          total_balance: "8.52",
+          granted_balance: "0.00",
+          topped_up_balance: "8.52",
+        }],
+      }));
+      return;
+    }
+    res.writeHead(404);
+    res.end("{}");
+  });
+  const address = await listen(server);
+  t.after(() => close(server));
+
+  const data = await fetchBalance({
+    apiKey: "sk-test",
+    baseUrl: `http://127.0.0.1:${address.port}`,
+  });
+  assert.equal(auth, "Bearer sk-test");
+  assert.equal(data.balance_infos[0].total_balance, "8.52");
+
+  await assert.rejects(
+    fetchBalance({ apiKey: "bad", baseUrl: `http://127.0.0.1:${address.port}/nope` }),
+    /HTTP 404/,
+  );
 });

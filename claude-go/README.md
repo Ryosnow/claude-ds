@@ -1,19 +1,32 @@
 # claude-go
 
-让 Claude Code 使用 OpenCode Go 套餐中的模型（默认 `deepseek-v4-flash`，可通过配置文件切换多个模型）。唯一必填配置是：
+一个命令让 Claude Code 使用任意 OpenAI 兼容后端——OpenCode Go、DeepSeek 官方 API 都只是配置里的一条档案，无需关心背后是哪家服务。
 
 ```sh
-export OPENCODE_API_KEY="你的 OpenCode Go API Key"
+claude-go                # 用默认模型进入 Claude Code
+claude-go --model ds     # 切到另一个模型档案
+claude-go balance        # 查 DeepSeek 账户余额
 ```
 
-`claude-go` 会在本机临时启动一个仅监听 `127.0.0.1` 的协议转换服务，把 Claude Code 的 Anthropic Messages 请求转换成 OpenCode Go 的 OpenAI-compatible Chat Completions 请求。退出 Claude Code 后，本地服务会自动关闭。
+> 本工具是 `claude-ds` + `claude-go` 两个旧工具的合并体：启动器统一走本地协议转换代理，余额查询并入为子命令。macOS 菜单栏余额 App 保留在 [DeepSeekUsage/](../DeepSeekUsage/)。
+
+## 工作原理
+
+```text
+Claude Code
+  -> http://127.0.0.1:<随机端口>/v1/messages     （Anthropic Messages 格式）
+  -> claude-go 本地协议转换                       （按所选档案决定上游与密钥）
+  -> 上游 OpenAI 兼容接口                          （OpenCode Go / DeepSeek 官方 / 其他）
+```
+
+每次启动临时起一个仅监听 `127.0.0.1` 的转换服务，退出 Claude Code 后自动关闭。
 
 ## 要求
 
 - macOS、Linux 或 WSL
 - Node.js 20+
 - 已安装并可直接运行的 `claude` 命令
-- 有效的 OpenCode Go 订阅与 API Key
+- 对应服务的账号与 API Key
 
 ## 安装
 
@@ -22,81 +35,7 @@ chmod +x install.sh claude-go
 ./install.sh
 ```
 
-安装器默认把命令复制到 `~/.local/bin/claude-go`。如果该位置已经有同名文件，安装器会先创建带时间戳的备份。
-
-然后配置唯一的环境变量：
-
-```sh
-export OPENCODE_API_KEY="你的 OpenCode Go API Key"
-```
-
-如需永久生效，可把上面这一行加入 `~/.zshrc`、`~/.bashrc` 或其他 shell 配置文件。不要把 API Key 提交到 Git。
-
-## 配置文件：多模型支持（可选）
-
-不写配置文件也能用（内置默认 `deepseek-v4-flash`）。想配置多个模型时，复制示例并编辑：
-
-```sh
-mkdir -p ~/.config/claude-go
-cp config.example.json ~/.config/claude-go/config.json
-chmod 600 ~/.config/claude-go/config.json
-```
-
-配置文件位置：`~/.config/claude-go/config.json`，或用环境变量 `CLAUDE_GO_CONFIG` 指向任意路径。
-
-```json
-{
-  "default": "flash",
-  "models": {
-    "flash": { "model": "deepseek-v4-flash" },
-    "pro":   { "model": "deepseek-v4-pro", "api_key": "sk-...", "base_url": "https://..." }
-  }
-}
-```
-
-每个模型档案的字段都是可选的：
-
-| 字段 | 说明 | 缺省 |
-|------|------|------|
-| `model` | 发给上游的模型名 | `deepseek-v4-flash` |
-| `api_key` | 该模型专用 Key | 回退到环境变量 `OPENCODE_API_KEY` |
-| `base_url` | 该模型专用上游接口 | OpenCode Go 官方端点 |
-
-## 选择模型
-
-三种方式（优先级从高到低）：
-
-```sh
-# 1. 命令行参数（仅当值是配置里的档案名时才拦截，否则原样透传给 Claude Code）
-claude-go --model pro
-claude-go -m pro
-
-# 2. 环境变量
-CLAUDE_GO_MODEL=pro claude-go
-
-# 3. 都不指定 → 用配置里的 "default" 档案（没有配置则用内置默认）
-claude-go
-```
-
-自检时会打印配置文件状态和当前生效的模型：
-
-```sh
-claude-go doctor
-```
-
-## 使用
-
-```sh
-claude-go
-```
-
-Claude Code 的参数会原样透传：
-
-```sh
-claude-go -p "解释这个项目"
-claude-go -c
-claude-go --resume SESSION_ID
-```
+安装器把命令复制到 `~/.local/bin/claude-go`（已有同名先备份），并检查 Node 与 Claude Code。
 
 自检：
 
@@ -104,37 +43,108 @@ claude-go --resume SESSION_ID
 claude-go doctor
 ```
 
-查看本工具帮助：
+## 配置文件：一份配置，多个模型
+
+配置文件位于 `~/.config/claude-go/config.json`（或环境变量 `CLAUDE_GO_CONFIG` 指向任意路径）。不写配置也能用（内置默认 `deepseek-v4-flash` + 环境变量 Key）。要配置多个模型：
 
 ```sh
-claude-go --claude-go-help
+mkdir -p ~/.config/claude-go
+cp config.example.json ~/.config/claude-go/config.json
+chmod 600 ~/.config/claude-go/config.json
 ```
 
-## 安全与兼容性
-
-- API Key 优先读取所选模型档案里的 `api_key`，否则读环境变量 `OPENCODE_API_KEY`；只发送到该档案的 `base_url`（默认 `https://opencode.ai/zen/go/v1/chat/completions`）。
-- 启动 Claude Code 前会从子进程环境中移除 `OPENCODE_API_KEY`，避免 Claude Code 的 Shell 工具直接继承真实 Key。
-- 本地代理使用每次启动随机生成的临时令牌，并仅监听回环地址。
-- 模型由配置决定（默认 `deepseek-v4-flash`），包括 Claude Code 的 Opus、Sonnet、Haiku 与子代理模型映射。
-- 支持文本、流式输出、并行工具调用、工具结果和非流式响应。
-- Anthropic 的提示词缓存控制、扩展思考签名和 DeepSeek 不支持的多模态能力无法完全等价转换；相关字段会被安全忽略或降级。
-
-## 工作原理
-
-```text
-Claude Code
-  -> http://127.0.0.1:<随机端口>/v1/messages
-  -> claude-go 协议转换（按配置选择模型）
-  -> https://opencode.ai/zen/go/v1/chat/completions
-  -> deepseek-v4-flash / 配置的其他模型
+```json
+{
+  "default": "flash",
+  "models": {
+    "flash": { "model": "deepseek-v4-flash" },
+    "pro":   { "model": "deepseek-v4-pro", "api_key": "sk-..." },
+    "ds-chat": {
+      "model": "deepseek-chat",
+      "base_url": "https://api.deepseek.com",
+      "api_key_file": "~/.config/deepseek/api_key"
+    }
+  }
+}
 ```
+
+每个档案的字段都是可选的：
+
+| 字段 | 说明 | 缺省 |
+|------|------|------|
+| `model` | 发给上游的模型名 | `deepseek-v4-flash` |
+| `api_key` | 内联密钥 | 依次回退：`api_key_file` → 环境变量 `OPENCODE_API_KEY` |
+| `api_key_file` | 密钥文件路径（支持 `~`） | —— |
+| `base_url` | 任意 OpenAI 兼容端点；缺 `/chat/completions` 时自动补全 | OpenCode Go 官方端点 |
+
+**不区分服务商的关键就在 `base_url`**：OpenCode Go 和 DeepSeek 官方 API 都是 OpenAI 兼容接口，各写一条档案即可自由切换。
+
+## 选择模型
+
+三种方式（优先级从高到低）：
+
+```sh
+# 1. 命令行参数（仅当值是配置里的档案名时才拦截，否则原样透传给 Claude Code）
+claude-go --model ds-chat
+claude-go -m pro
+
+# 2. 环境变量
+CLAUDE_GO_MODEL=pro claude-go
+
+# 3. 都不指定 → 配置里的 "default" 档案（没有配置则内置默认）
+claude-go
+```
+
+## 查询 DeepSeek 余额
+
+```sh
+$ claude-go balance
+================ DeepSeek 账户余额 ================
+账户状态  : ✅ 可用
+币种      : CNY
+总余额    : ¥8.52
+充值余额  : ¥8.52
+赠送余额  : ¥0.00
+===================================================
+
+$ claude-go balance --raw     # 原始 JSON
+```
+
+Key 读取顺序：环境变量 `DEEPSEEK_API_KEY` → `~/.config/deepseek/api_key` → `~/.config/deepseek/token`（仅识别 `sk-` 开头，兼容旧版）。
+
+### macOS 菜单栏余额 App
+
+独立的常驻菜单栏应用，鼠标悬停看总余额、点击展开详情、每 5 分钟自动刷新：
+
+```sh
+cd DeepSeekUsage && ./build.sh          # 首次构建
+open DeepSeekUsage/DeepSeekUsage.app    # 启动
+```
+
+## 安全设计
+
+- 每档案的 Key 只由父进程读取，仅发送到该档案的 `base_url`
+- 启动 Claude Code 前会从子进程环境中移除 `OPENCODE_API_KEY`，避免 Claude Code 的 Shell 工具直接继承真实 Key
+- 本地代理使用每次启动随机生成的临时令牌，并仅监听回环地址
+- 支持文本、流式输出、并行工具调用、工具结果和非流式响应；Anthropic 的提示词缓存控制等无法等价转换的字段会被安全忽略或降级
+
+## 从旧版迁移
+
+| 旧用法 | 新用法 |
+|--------|--------|
+| `claude-ds`（DeepSeek 官方后端） | `claude-go --model ds-chat`（档案名自取） |
+| `claude-ds balance` | `claude-go balance` |
+| `claude-go`（OpenCode Go） | 不变，或显式 `claude-go --model flash` |
+| `~/.config/deepseek/api_key` | 继续有效，档案里用 `"api_key_file"` 引用即可 |
+
+旧的 `claude-ds` 命令与 vendor/deepclaude 依赖已删除，统一走本工具。
 
 ## 开发验证
 
-项目没有第三方运行时依赖：
+零第三方运行时依赖：
 
 ```sh
 npm test
 ```
 
-测试使用本地模拟服务，不会读取真实 API Key，也不会消耗 OpenCode Go 额度。
+测试使用本地模拟服务，不会读取真实 API Key，也不会消耗任何额度。

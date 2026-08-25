@@ -3,7 +3,7 @@
 import { createServer } from "node:http";
 import { randomBytes, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,6 +50,31 @@ export function loadConfig(path = configPath()) {
   return parsed;
 }
 
+function expandTilde(path) {
+  const home = process.env.HOME || homedir();
+  return path.startsWith("~/") ? join(home, path.slice(2)) : path;
+}
+
+export function normalizeChatCompletionsUrl(url) {
+  const trimmed = url.replace(/\/+$/, "");
+  return trimmed.endsWith("/chat/completions")
+    ? trimmed
+    : `${trimmed}/chat/completions`;
+}
+
+function readKeyFile(path) {
+  const resolved = expandTilde(path);
+  let raw;
+  try {
+    raw = readFileSync(resolved, "utf8");
+  } catch (error) {
+    throw new Error(`无法读取 api_key_file "${path}"（${resolved}）：${error.message}`);
+  }
+  const key = raw.trim();
+  if (!key) throw new Error(`api_key_file "${path}"（${resolved}）内容为空`);
+  return key;
+}
+
 export function resolveModelProfile(config, requestedName) {
   const models =
     config.models && typeof config.models === "object" ? config.models : {};
@@ -72,19 +97,107 @@ export function resolveModelProfile(config, requestedName) {
       `未知模型档案 "${name}"。可用的有：${known}（配置文件：${configPath()}）`,
     );
   }
+
+  let apiKey = null;
+  if (typeof entry.api_key === "string" && entry.api_key) {
+    apiKey = entry.api_key;
+  } else if (typeof entry.api_key_file === "string" && entry.api_key_file) {
+    apiKey = readKeyFile(entry.api_key_file);
+  }
+
   return {
     name,
     model:
       typeof entry.model === "string" && entry.model
         ? entry.model
         : DEFAULT_MODEL,
-    apiKey:
-      typeof entry.api_key === "string" && entry.api_key ? entry.api_key : null,
+    apiKey,
     upstreamUrl:
       typeof entry.base_url === "string" && entry.base_url
-        ? entry.base_url
+        ? normalizeChatCompletionsUrl(entry.base_url)
         : null,
   };
+}
+
+export function resolveDeepSeekKey({ env = process.env } = {}) {
+  if (typeof env.DEEPSEEK_API_KEY === "string" && env.DEEPSEEK_API_KEY) {
+    return { source: "$DEEPSEEK_API_KEY", apiKey: env.DEEPSEEK_API_KEY };
+  }
+  const home = env.HOME || homedir();
+  const tilde = (path) => (path.startsWith("~/") ? join(home, path.slice(2)) : path);
+  for (const [path, legacy] of [
+    ["~/.config/deepseek/api_key", false],
+    ["~/.config/deepseek/token", true],
+  ]) {
+    const resolved = tilde(path);
+    if (!existsSync(resolved)) continue;
+    let raw = "";
+    try {
+      raw = readFileSync(resolved, "utf8").trim();
+    } catch {
+      continue;
+    }
+    if (!raw) continue;
+    if (legacy && !raw.startsWith("sk-")) continue;
+    return { source: resolved, apiKey: raw };
+  }
+  return null;
+}
+
+export async function fetchBalance({
+  apiKey,
+  baseUrl = "https://api.deepseek.com",
+  timeoutMs = 15_000,
+} = {}) {
+  if (!apiKey) throw new Error("未找到 DeepSeek API Key");
+  const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/user/balance`, {
+    headers: { authorization: `Bearer ${apiKey}`, accept: "application/json" },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    let message = text.trim();
+    try {
+      message = JSON.parse(text)?.error?.message ?? message;
+    } catch {}
+    throw new Error(`HTTP ${response.status}${message ? `：${message}` : ""}`);
+  }
+  return JSON.parse(text);
+}
+
+function printBalance(data) {
+  const info = data?.balance_infos?.[0];
+  if (!info) throw new Error("响应中没有 balance_infos，原始数据见 --raw");
+  const symbol = info.currency === "CNY" ? "¥" : info.currency === "USD" ? "$" : `${info.currency} `;
+  const money = (v) =>
+    Number.isFinite(Number(v)) ? `${symbol}${Number(v).toFixed(2)}` : `${symbol}${v}`;
+  console.log("================ DeepSeek 账户余额 ================");
+  console.log(`账户状态  : ${data.is_available ? "✅ 可用" : "⛔️ 不可用"}`);
+  console.log(`币种      : ${info.currency}`);
+  console.log(`总余额    : ${money(info.total_balance)}`);
+  console.log(`充值余额  : ${money(info.topped_up_balance)}`);
+  console.log(`赠送余额  : ${money(info.granted_balance)}`);
+  console.log("===================================================");
+}
+
+async function balanceCommand(args) {
+  const raw = args.includes("--raw");
+  const found = resolveDeepSeekKey();
+  if (!found) {
+    console.error(
+      "未找到 DeepSeek API Key。请设置 DEEPSEEK_API_KEY，或写入 ~/.config/deepseek/api_key",
+    );
+    return 1;
+  }
+  try {
+    const data = await fetchBalance({ apiKey: found.apiKey });
+    if (raw) console.log(JSON.stringify(data, null, 2));
+    else printBalance(data);
+    return 0;
+  } catch (error) {
+    console.error(`查询余额失败：${error.message}`);
+    return 1;
+  }
 }
 
 export function extractModelSelection(args, config) {
@@ -692,13 +805,24 @@ Config file:
   {
     "default": "flash",
     "models": {
-      "flash": { "model": "deepseek-v4-flash" },
-      "pro":   { "model": "deepseek-v4-pro", "api_key": "...", "base_url": "..." }
+      "flash":   { "model": "deepseek-v4-flash" },
+      "pro":     { "model": "deepseek-v4-pro", "api_key": "..." },
+      "ds-chat": { "model": "deepseek-chat",
+                   "base_url": "https://api.deepseek.com",
+                   "api_key_file": "~/.config/deepseek/api_key" }
     }
   }
-  Per-profile fields are all optional: model (defaults to ${DEFAULT_MODEL}),
-  api_key (falls back to OPENCODE_API_KEY), base_url (falls back to the
-  OpenCode Go endpoint).
+  Per-profile fields are all optional:
+    model          defaults to ${DEFAULT_MODEL}
+    api_key        inline key; falls back to api_key_file, then OPENCODE_API_KEY
+    api_key_file   path to a key file (~ expanded), e.g. ~/.config/deepseek/api_key
+    base_url       any OpenAI-compatible endpoint; "/chat/completions" is
+                   appended when missing. Defaults to the OpenCode Go endpoint.
+
+Balance (DeepSeek platform):
+  claude-go balance           pretty-print DeepSeek account balance
+  claude-go balance --raw     raw JSON
+  Uses DEEPSEEK_API_KEY or ~/.config/deepseek/api_key.
 
 Required environment:
   OPENCODE_API_KEY    Your OpenCode Go API key (unless set per profile)
@@ -707,6 +831,8 @@ Examples:
   claude-go
   claude-go -p "explain this project"
   claude-go --model pro
+  claude-go --model ds-chat
+  claude-go balance
   claude-go -c
 `);
 }
@@ -740,10 +866,13 @@ function doctor() {
     for (const name of profiles) {
       const entry = config.models[name];
       const model = entry.model || DEFAULT_MODEL;
-      const keyFrom = entry.api_key ? "config" : "env";
+      const keyFrom = entry.api_key ? "config" : entry.api_key_file ? `file: ${entry.api_key_file}` : "env";
       console.log(`  - ${name} → ${model}（api_key: ${keyFrom}${entry.base_url ? `, base_url: 自定义` : ""}）`);
     }
   }
+
+  const deepseekKey = resolveDeepSeekKey();
+  console.log(`${deepseekKey ? "✓" : "ℹ"} DeepSeek 余额查询 Key${deepSeekLabel(deepseekKey)}`);
 
   let selectedLabel;
   try {
@@ -761,7 +890,16 @@ function hasProfileApiKey(config) {
   const defaultName = typeof config.default === "string" ? config.default : null;
   if (!defaultName) return false;
   const entry = models[defaultName];
-  return Boolean(entry && typeof entry.api_key === "string" && entry.api_key);
+  if (!entry || typeof entry !== "object") return false;
+  return Boolean(
+    (typeof entry.api_key === "string" && entry.api_key) ||
+      (typeof entry.api_key_file === "string" && entry.api_key_file),
+  );
+}
+
+function deepSeekLabel(found) {
+  if (!found) return "：未配置（DEEPSEEK_API_KEY 或 ~/.config/deepseek/api_key，仅影响 balance 子命令）";
+  return `：${found.source}`;
 }
 
 async function runClaude(args) {
@@ -774,7 +912,7 @@ async function runClaude(args) {
   const apiKey = profile.apiKey ?? process.env.OPENCODE_API_KEY;
   if (!apiKey) {
     throw new Error(
-      "未找到 API Key：请在配置文件对应模型档案里设置 \"api_key\"，或 export OPENCODE_API_KEY=...",
+      "未找到 API Key：请在配置文件对应模型档案里设置 \"api_key\" 或 \"api_key_file\"，或 export OPENCODE_API_KEY=...",
     );
   }
 
@@ -817,6 +955,7 @@ async function runClaude(args) {
 
 export async function main(args = process.argv.slice(2)) {
   if (args[0] === "doctor") return doctor();
+  if (args[0] === "balance") return balanceCommand(args.slice(1));
   if (args[0] === "--claude-go-help" || args[0] === "--version") {
     if (args[0] === "--version") console.log(VERSION);
     else printHelp();

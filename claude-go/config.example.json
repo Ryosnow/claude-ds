@@ -8,6 +8,16 @@
       "model": "deepseek-v4-pro",
       "api_key": "sk-你的OpenCodeGoKey",
       "base_url": "https://opencode.ai/zen/go/v1/chat/completions"
+    },
+    "ds-chat": {
+      "model": "deepseek-chat",
+      "base_url": "https://api.deepseek.com",
+      "api_key_file": "~/.config/deepseek/api_key"
+    },
+    "ds-reasoner": {
+      "model": "deepseek-reasoner",
+      "base_url": "https://api.deepseek.com/chat/completions",
+      "api_key_file": "~/.config/deepseek/api_key"
     }
   }
 }

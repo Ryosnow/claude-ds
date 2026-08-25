@@ -2,10 +2,7 @@
 .DS_Store
 
 # 构建产物（DeepSeekUsage/build.sh 生成）
-claude-ds/DeepSeekUsage/DeepSeekUsage.app/
-
-# 上游项目，由 install.sh 克隆到本地
-claude-ds/vendor/
+DeepSeekUsage/DeepSeekUsage.app/
 
 # Node
 node_modules/
