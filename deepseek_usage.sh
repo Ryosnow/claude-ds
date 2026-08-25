@@ -54,17 +54,43 @@ _request() {
     local method="$1"
     local path="$2"
     local body="${3:-}"
+    local tmp status rc=0
 
+    tmp="$(mktemp)"
     local args=(
         -sS
+        --connect-timeout 5
+        --max-time 30
         -X "$method"
         -H "Authorization: Bearer $API_KEY"
         -H "Accept: application/json"
+        -o "$tmp"
+        -w '%{http_code}'
     )
     if [[ -n "$body" ]]; then
         args+=(-H "Content-Type: application/json" --data "$body")
     fi
-    curl "${args[@]}" "${BASE_URL}${path}"
+
+    status="$(curl "${args[@]}" "${BASE_URL}${path}")" || rc=$?
+    if (( rc != 0 )); then
+        rm -f "$tmp"
+        echo "❌ 网络请求失败（超时或连接错误，curl 退出码 ${rc}）" >&2
+        exit 1
+    fi
+
+    if [[ ! "$status" =~ ^2 ]]; then
+        echo "❌ API 返回 HTTP $status" >&2
+        if [[ "$status" == "401" || "$status" == "403" ]]; then
+            echo "   鉴权失败，请检查 API Key 是否正确" >&2
+        fi
+        cat "$tmp" >&2
+        echo "" >&2
+        rm -f "$tmp"
+        exit 1
+    fi
+
+    cat "$tmp"
+    rm -f "$tmp"
 }
 
 # ---------- 美化输出（balance） ----------

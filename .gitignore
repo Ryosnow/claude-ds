@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# 构建产物（DeepSeekUsage/build.sh 生成）
+DeepSeekUsage/DeepSeekUsage.app/
+
+# 上游项目，由 install.sh 克隆到本地
+vendor/deepclaude/
+
+# Node
+node_modules/

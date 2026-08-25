@@ -153,7 +153,7 @@ deepseek-usage/
 │   ├── DeepSeekUsage.swift
 │   ├── deepseek.svg
 │   ├── build.sh
-│   └── DeepSeekUsage.app
+│   └── DeepSeekUsage.app        # 构建产物（不入库，由 build.sh 生成）
 └── vendor/
     └── deepclaude/               # 上游开源项目（git clone）
         └── deepclaude.sh
