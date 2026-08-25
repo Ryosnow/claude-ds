@@ -1,0 +1,13 @@
+{
+  "default": "flash",
+  "models": {
+    "flash": {
+      "model": "deepseek-v4-flash"
+    },
+    "pro": {
+      "model": "deepseek-v4-pro",
+      "api_key": "sk-你的OpenCodeGoKey",
+      "base_url": "https://opencode.ai/zen/go/v1/chat/completions"
+    }
+  }
+}

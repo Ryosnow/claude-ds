@@ -7,8 +7,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  DEFAULT_MODEL,
   MODEL,
+  extractModelSelection,
   fromOpenAIResponse,
+  loadConfig,
+  resolveModelProfile,
   startProxy,
   toOpenAIRequest,
 } from "../claude-go.mjs";
@@ -185,6 +189,110 @@ test("provides a local token estimate without contacting upstream", async (t) =>
   assert.ok((await response.json()).input_tokens > 0);
 });
 
+test("config: missing file yields an empty config, invalid JSON throws", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "claude-go-config-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  assert.deepEqual(loadConfig(join(directory, "absent.json")), {});
+
+  const bad = join(directory, "bad.json");
+  await writeFile(bad, "{ not json");
+  assert.throws(() => loadConfig(bad), /不是合法 JSON/);
+
+  const good = join(directory, "good.json");
+  await writeFile(good, JSON.stringify({
+    default: "flash",
+    models: { flash: { model: "deepseek-v4-flash" }, pro: { model: "deepseek-v4-pro" } },
+  }));
+  assert.deepEqual(Object.keys(loadConfig(good).models), ["flash", "pro"]);
+});
+
+test("resolveModelProfile picks requested, env, default, or built-in profile", () => {
+  const config = {
+    default: "flash",
+    models: {
+      flash: { model: "deepseek-v4-flash" },
+      pro: { model: "deepseek-v4-pro", api_key: "sk-profile-key", base_url: "https://example.test/v1/chat/completions" },
+    },
+  };
+
+  const fallback = resolveModelProfile({}, null);
+  assert.equal(fallback.model, DEFAULT_MODEL);
+  assert.equal(fallback.apiKey, null);
+
+  delete process.env.CLAUDE_GO_MODEL;
+  assert.equal(resolveModelProfile(config, null).model, "deepseek-v4-flash");
+  assert.equal(resolveModelProfile(config, "pro").model, "deepseek-v4-pro");
+
+  process.env.CLAUDE_GO_MODEL = "pro";
+  try {
+    assert.equal(resolveModelProfile(config, null).name, "pro");
+  } finally {
+    delete process.env.CLAUDE_GO_MODEL;
+  }
+
+  const pro = resolveModelProfile(config, "pro");
+  assert.equal(pro.apiKey, "sk-profile-key");
+  assert.equal(pro.upstreamUrl, "https://example.test/v1/chat/completions");
+
+  assert.throws(() => resolveModelProfile(config, "nope"), /未知模型档案/);
+});
+
+test("extractModelSelection intercepts only known profile names", () => {
+  const config = { models: { pro: { model: "deepseek-v4-pro" } } };
+
+  const picked = extractModelSelection(["--model", "pro", "-p", "hi"], config);
+  assert.deepEqual(picked.args, ["-p", "hi"]);
+  assert.equal(picked.selected, "pro");
+
+  const inline = extractModelSelection(["--model=pro"], config);
+  assert.deepEqual(inline.args, []);
+  assert.equal(inline.selected, "pro");
+
+  const short = extractModelSelection(["-m", "pro"], config);
+  assert.equal(short.selected, "pro");
+
+  // Unknown model values must pass through to Claude Code untouched.
+  const passthrough = extractModelSelection(["--model", "sonnet"], config);
+  assert.deepEqual(passthrough.args, ["--model", "sonnet"]);
+  assert.equal(passthrough.selected, null);
+});
+
+test("proxy uses the selected profile's model end to end", async (t) => {
+  let received;
+  const upstream = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    received = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: "chatcmpl_pro",
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }));
+  });
+  const upstreamAddress = await listen(upstream);
+  t.after(() => close(upstream));
+
+  const proxy = await startProxy({
+    apiKey: "k",
+    model: "deepseek-v4-pro",
+    localToken: "profile-token",
+    upstreamUrl: `http://127.0.0.1:${upstreamAddress.port}/v1/chat/completions`,
+  });
+  t.after(() => proxy.close());
+
+  assert.match((await (await fetch(proxy.baseUrl)).json()).model, /pro$/);
+
+  const response = await fetch(`${proxy.baseUrl}/v1/messages`, {
+    method: "POST",
+    headers: { authorization: "Bearer profile-token", "content-type": "application/json" },
+    body: JSON.stringify({ max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+  });
+  assert.equal(received.model, "deepseek-v4-pro");
+  assert.equal((await response.json()).model, "deepseek-v4-pro");
+});
+
 test("launcher hides the real key and injects the temporary gateway", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "claude-go-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -200,6 +308,7 @@ exec node -e 'fetch(process.env.ANTHROPIC_BASE_URL + "/health").then(r => r.json
       ...process.env,
       PATH: `${directory}:${process.env.PATH}`,
       OPENCODE_API_KEY: "real-key-must-not-reach-child",
+      CLAUDE_GO_CONFIG: join(directory, "no-config.json"),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

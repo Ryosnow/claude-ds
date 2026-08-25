@@ -3,15 +3,117 @@
 import { createServer } from "node:http";
 import { randomBytes, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const VERSION = "0.1.0";
-export const MODEL = "deepseek-v4-flash";
+export const DEFAULT_MODEL = "deepseek-v4-flash";
+export const MODEL = DEFAULT_MODEL;
 export const DEFAULT_UPSTREAM =
   "https://opencode.ai/zen/go/v1/chat/completions";
 
 const MAX_REQUEST_BYTES = 128 * 1024 * 1024;
+
+export function configPath() {
+  return (
+    process.env.CLAUDE_GO_CONFIG ||
+    join(homedir(), ".config", "claude-go", "config.json")
+  );
+}
+
+export function loadConfig(path = configPath()) {
+  let raw;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return {};
+    throw new Error(`无法读取配置文件 ${path}：${error.message}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`配置文件 ${path} 不是合法 JSON：${error.message}`);
+  }
+  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`配置文件 ${path} 的顶层必须是一个 JSON 对象`);
+  }
+  if (parsed.models != null && typeof parsed.models === "object" && !Array.isArray(parsed.models)) {
+    for (const [name, entry] of Object.entries(parsed.models)) {
+      if (entry == null || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new Error(`配置文件 ${path} 中 models.${name} 必须是对象`);
+      }
+    }
+  }
+  return parsed;
+}
+
+export function resolveModelProfile(config, requestedName) {
+  const models =
+    config.models && typeof config.models === "object" ? config.models : {};
+  const defaultName =
+    typeof config.default === "string" && config.default ? config.default : null;
+  const name = requestedName || process.env.CLAUDE_GO_MODEL || defaultName;
+
+  if (!name) {
+    return {
+      name: "(内置默认)",
+      model: DEFAULT_MODEL,
+      apiKey: null,
+      upstreamUrl: null,
+    };
+  }
+  const entry = models[name];
+  if (entry == null || typeof entry !== "object") {
+    const known = Object.keys(models).join(", ") || "(无)";
+    throw new Error(
+      `未知模型档案 "${name}"。可用的有：${known}（配置文件：${configPath()}）`,
+    );
+  }
+  return {
+    name,
+    model:
+      typeof entry.model === "string" && entry.model
+        ? entry.model
+        : DEFAULT_MODEL,
+    apiKey:
+      typeof entry.api_key === "string" && entry.api_key ? entry.api_key : null,
+    upstreamUrl:
+      typeof entry.base_url === "string" && entry.base_url
+        ? entry.base_url
+        : null,
+  };
+}
+
+export function extractModelSelection(args, config) {
+  const models =
+    config.models && typeof config.models === "object" ? config.models : {};
+  const names = new Set(Object.keys(models));
+  const rest = [];
+  let selected = null;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    let value = null;
+    if ((arg === "--model" || arg === "-m") && i + 1 < args.length) {
+      const next = args[i + 1];
+      if (names.has(next)) {
+        value = next;
+        i++;
+      }
+    } else if (arg.startsWith("--model=")) {
+      const candidate = arg.slice("--model=".length);
+      if (names.has(candidate)) value = candidate;
+    }
+    if (value != null) {
+      selected = value;
+      continue;
+    }
+    rest.push(arg);
+  }
+  return { args: rest, selected };
+}
 
 function jsonResponse(res, status, value) {
   const body = JSON.stringify(value);
@@ -168,7 +270,7 @@ function convertToolChoice(choice) {
   return undefined;
 }
 
-export function toOpenAIRequest(body) {
+export function toOpenAIRequest(body, model = DEFAULT_MODEL) {
   const messages = [];
   const system = systemText(body.system);
   if (system) messages.push({ role: "system", content: system });
@@ -182,7 +284,7 @@ export function toOpenAIRequest(body) {
   }
 
   const request = {
-    model: MODEL,
+    model,
     messages,
     max_tokens: Number.isFinite(body.max_tokens) ? body.max_tokens : 8192,
     stream: Boolean(body.stream),
@@ -229,7 +331,7 @@ function normalizedArguments(value) {
   }
 }
 
-export function fromOpenAIResponse(data) {
+export function fromOpenAIResponse(data, model = DEFAULT_MODEL) {
   const choice = data?.choices?.[0] ?? {};
   const message = choice.message ?? {};
   const content = [];
@@ -260,7 +362,7 @@ export function fromOpenAIResponse(data) {
     id: data.id || `msg_${randomUUID().replaceAll("-", "")}`,
     type: "message",
     role: "assistant",
-    model: MODEL,
+    model,
     content,
     stop_reason: stopReason(choice.finish_reason, content.some((x) => x.type === "tool_use")),
     stop_sequence: null,
@@ -284,7 +386,7 @@ function parseSseEvent(raw) {
   return data || null;
 }
 
-async function translateStream(upstream, res) {
+async function translateStream(upstream, res, model = DEFAULT_MODEL) {
   const messageId = `msg_${randomUUID().replaceAll("-", "")}`;
   let inputTokens = 0;
   let outputTokens = 0;
@@ -308,7 +410,7 @@ async function translateStream(upstream, res) {
       type: "message",
       role: "assistant",
       content: [],
-      model: MODEL,
+      model,
       stop_reason: null,
       stop_sequence: null,
       usage: { input_tokens: 0, output_tokens: 0 },
@@ -462,6 +564,7 @@ function isAuthorized(req, localToken) {
 
 export async function startProxy({
   apiKey,
+  model = DEFAULT_MODEL,
   localToken = randomBytes(24).toString("hex"),
   upstreamUrl = DEFAULT_UPSTREAM,
   host = "127.0.0.1",
@@ -473,7 +576,7 @@ export async function startProxy({
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
-      jsonResponse(res, 200, { ok: true, model: MODEL, version: VERSION });
+      jsonResponse(res, 200, { ok: true, model, version: VERSION });
       return;
     }
     if (!isAuthorized(req, localToken)) {
@@ -515,7 +618,7 @@ export async function startProxy({
           accept: body.stream ? "text/event-stream" : "application/json",
           "user-agent": `claude-go/${VERSION}`,
         },
-        body: JSON.stringify(toOpenAIRequest(body)),
+        body: JSON.stringify(toOpenAIRequest(body, model)),
         signal: controller.signal,
       });
     } catch (error) {
@@ -534,10 +637,10 @@ export async function startProxy({
 
     try {
       if (body.stream) {
-        await translateStream(upstream, res);
+        await translateStream(upstream, res, model);
       } else {
         const data = await upstream.json();
-        jsonResponse(res, 200, fromOpenAIResponse(data));
+        jsonResponse(res, 200, fromOpenAIResponse(data, model));
       }
     } catch (error) {
       if (res.headersSent) {
@@ -569,19 +672,41 @@ export async function startProxy({
 function printHelp() {
   console.log(`claude-go ${VERSION}
 
-Run Claude Code with OpenCode Go's ${MODEL} model.
+Run Claude Code with OpenCode Go models (default: ${DEFAULT_MODEL}).
 
 Usage:
   claude-go [claude arguments...]
+  claude-go --model <profile> [claude arguments...]
   claude-go doctor
   claude-go --claude-go-help
 
+Selecting a model:
+  claude-go --model <profile>    Use a profile defined in the config file
+  CLAUDE_GO_MODEL=<profile>      Same, via environment variable
+  Without either, the config's "default" profile (or ${DEFAULT_MODEL}) is used.
+  "--model"/"-m" is only intercepted when its value matches a profile name;
+  otherwise it is passed through to Claude Code unchanged.
+
+Config file:
+  $CLAUDE_GO_CONFIG or ~/.config/claude-go/config.json
+  {
+    "default": "flash",
+    "models": {
+      "flash": { "model": "deepseek-v4-flash" },
+      "pro":   { "model": "deepseek-v4-pro", "api_key": "...", "base_url": "..." }
+    }
+  }
+  Per-profile fields are all optional: model (defaults to ${DEFAULT_MODEL}),
+  api_key (falls back to OPENCODE_API_KEY), base_url (falls back to the
+  OpenCode Go endpoint).
+
 Required environment:
-  OPENCODE_API_KEY    Your OpenCode Go API key
+  OPENCODE_API_KEY    Your OpenCode Go API key (unless set per profile)
 
 Examples:
   claude-go
   claude-go -p "explain this project"
+  claude-go --model pro
   claude-go -c
 `);
 }
@@ -595,33 +720,83 @@ function doctor() {
   console.log(`${nodeOk ? "✓" : "✗"} Node.js ${process.versions.node} (requires 20+)`);
   console.log(`${claudeOk ? "✓" : "✗"} Claude Code${claudeOk ? `: ${(claude.stdout || claude.stderr).trim()}` : " command not found"}`);
   console.log(`${keyOk ? "✓" : "✗"} OPENCODE_API_KEY${keyOk ? " is set" : " is not set"}`);
-  console.log(`✓ Model: ${MODEL}`);
-  return nodeOk && claudeOk && keyOk ? 0 : 1;
+
+  let config = {};
+  let configError = null;
+  try {
+    config = loadConfig();
+  } catch (error) {
+    configError = error.message;
+  }
+  const profiles = Object.keys(config.models ?? {});
+  if (configError) {
+    console.log(`✗ 配置文件：${configError}`);
+  } else if (profiles.length === 0) {
+    console.log(`ℹ 配置文件：未找到 ${configPath()}（使用内置默认 ${DEFAULT_MODEL} + OPENCODE_API_KEY）`);
+  } else {
+    const fallback = typeof config.default === "string" ? config.default : "(未设置)";
+    console.log(`✓ 配置文件：${configPath()}`);
+    console.log(`  默认档案: ${fallback}`);
+    for (const name of profiles) {
+      const entry = config.models[name];
+      const model = entry.model || DEFAULT_MODEL;
+      const keyFrom = entry.api_key ? "config" : "env";
+      console.log(`  - ${name} → ${model}（api_key: ${keyFrom}${entry.base_url ? `, base_url: 自定义` : ""}）`);
+    }
+  }
+
+  let selectedLabel;
+  try {
+    const profile = resolveModelProfile(config, process.env.CLAUDE_GO_MODEL);
+    selectedLabel = `${profile.name} → ${profile.model}`;
+  } catch (error) {
+    selectedLabel = `无法解析：${error.message}`;
+  }
+  console.log(`ℹ 当前生效模型: ${selectedLabel}`);
+  return nodeOk && claudeOk && (keyOk || configError == null && hasProfileApiKey(config)) ? 0 : 1;
+}
+
+function hasProfileApiKey(config) {
+  const models = config.models ?? {};
+  const defaultName = typeof config.default === "string" ? config.default : null;
+  if (!defaultName) return false;
+  const entry = models[defaultName];
+  return Boolean(entry && typeof entry.api_key === "string" && entry.api_key);
 }
 
 async function runClaude(args) {
   const major = Number(process.versions.node.split(".")[0]);
   if (major < 20) throw new Error(`Node.js 20+ is required; found ${process.versions.node}`);
-  const apiKey = process.env.OPENCODE_API_KEY;
+
+  const config = loadConfig();
+  const { args: claudeArgs, selected } = extractModelSelection(args, config);
+  const profile = resolveModelProfile(config, selected);
+  const apiKey = profile.apiKey ?? process.env.OPENCODE_API_KEY;
   if (!apiKey) {
-    throw new Error("OPENCODE_API_KEY is not set. Export it before running claude-go.");
+    throw new Error(
+      "未找到 API Key：请在配置文件对应模型档案里设置 \"api_key\"，或 export OPENCODE_API_KEY=...",
+    );
   }
 
-  const proxy = await startProxy({ apiKey });
+  const proxy = await startProxy({
+    apiKey,
+    model: profile.model,
+    ...(profile.upstreamUrl ? { upstreamUrl: profile.upstreamUrl } : {}),
+  });
   const childEnv = { ...process.env };
   delete childEnv.OPENCODE_API_KEY;
   Object.assign(childEnv, {
     ANTHROPIC_BASE_URL: proxy.baseUrl,
     ANTHROPIC_AUTH_TOKEN: proxy.localToken,
     ANTHROPIC_API_KEY: "",
-    ANTHROPIC_MODEL: MODEL,
-    ANTHROPIC_DEFAULT_OPUS_MODEL: MODEL,
-    ANTHROPIC_DEFAULT_SONNET_MODEL: MODEL,
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: MODEL,
-    CLAUDE_CODE_SUBAGENT_MODEL: MODEL,
+    ANTHROPIC_MODEL: profile.model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: profile.model,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: profile.model,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: profile.model,
+    CLAUDE_CODE_SUBAGENT_MODEL: profile.model,
   });
 
-  const child = spawn("claude", args, { stdio: "inherit", env: childEnv });
+  const child = spawn("claude", claudeArgs, { stdio: "inherit", env: childEnv });
   const relay = (signal) => {
     if (!child.killed) child.kill(signal);
   };
