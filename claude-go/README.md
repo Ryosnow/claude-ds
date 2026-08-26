@@ -119,7 +119,10 @@ Key 读取顺序：环境变量 `DEEPSEEK_API_KEY` → `~/.config/deepseek/api_k
 ```sh
 cd DeepSeekUsage && ./build.sh          # 首次构建
 open DeepSeekUsage/DeepSeekUsage.app    # 启动
+claude-go restart                       # 或：一键重启菜单栏 App
 ```
+
+`restart` 的 App 查找顺序：环境变量 `CLAUDE_GO_MENU_BAR_APP` → 本脚本所在目录的 `../DeepSeekUsage/DeepSeekUsage.app` → 按 Bundle ID（`local.rumor.deepseekusage`）启动。
 
 ## 安全设计
 

@@ -5,7 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { readFileSync, realpathSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const VERSION = "0.1.0";
@@ -198,6 +198,42 @@ async function balanceCommand(args) {
     console.error(`查询余额失败：${error.message}`);
     return 1;
   }
+}
+
+const MENU_BAR_APP_NAME = "DeepSeekUsage";
+const MENU_BAR_BUNDLE_ID = "local.rumor.deepseekusage";
+
+export function menuBarAppPath({ env = process.env, moduleDir = dirname(fileURLToPath(import.meta.url)) } = {}) {
+  if (typeof env.CLAUDE_GO_MENU_BAR_APP === "string" && env.CLAUDE_GO_MENU_BAR_APP) {
+    return env.CLAUDE_GO_MENU_BAR_APP;
+  }
+  const candidate = join(moduleDir, "..", MENU_BAR_APP_NAME, `${MENU_BAR_APP_NAME}.app`);
+  return existsSync(candidate) ? candidate : null;
+}
+
+function openMenuBarApp() {
+  const appPath = menuBarAppPath();
+  if (appPath && spawnSync("open", [appPath]).status === 0) return true;
+  if (spawnSync("open", ["-b", MENU_BAR_BUNDLE_ID]).status === 0) return true;
+  return false;
+}
+
+function restartMenuBarCommand() {
+  const running = spawnSync("pgrep", ["-x", MENU_BAR_APP_NAME], { encoding: "utf8" }).status === 0;
+  if (running) {
+    spawnSync("pkill", ["-x", MENU_BAR_APP_NAME]);
+    console.log(`✓ 已退出 ${MENU_BAR_APP_NAME}`);
+  } else {
+    console.log(`ℹ ${MENU_BAR_APP_NAME} 未在运行`);
+  }
+  if (!openMenuBarApp()) {
+    console.error("✗ 启动失败：未找到 DeepSeekUsage.app");
+    console.error("  请先在仓库 DeepSeekUsage/ 目录执行 ./build.sh 构建，");
+    console.error("  或用 CLAUDE_GO_MENU_BAR_APP 指向 .app 路径。");
+    return 1;
+  }
+  console.log("✓ 菜单栏余额 App 已启动");
+  return 0;
 }
 
 export function extractModelSelection(args, config) {
@@ -824,6 +860,11 @@ Balance (DeepSeek platform):
   claude-go balance --raw     raw JSON
   Uses DEEPSEEK_API_KEY or ~/.config/deepseek/api_key.
 
+Menu bar app (macOS):
+  claude-go restart           restart the DeepSeekUsage balance app
+  App lookup: $CLAUDE_GO_MENU_BAR_APP -> ../DeepSeekUsage relative to this
+  script -> LaunchServices bundle id.
+
 Required environment:
   OPENCODE_API_KEY    Your OpenCode Go API key (unless set per profile)
 
@@ -956,6 +997,7 @@ async function runClaude(args) {
 export async function main(args = process.argv.slice(2)) {
   if (args[0] === "doctor") return doctor();
   if (args[0] === "balance") return balanceCommand(args.slice(1));
+  if (args[0] === "restart") return restartMenuBarCommand();
   if (args[0] === "--claude-go-help" || args[0] === "--version") {
     if (args[0] === "--version") console.log(VERSION);
     else printHelp();

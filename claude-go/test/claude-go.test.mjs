@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,7 @@ import {
   fetchBalance,
   fromOpenAIResponse,
   loadConfig,
+  menuBarAppPath,
   normalizeChatCompletionsUrl,
   resolveDeepSeekKey,
   resolveModelProfile,
@@ -402,6 +404,34 @@ test("resolveDeepSeekKey prefers env, then files, and skips legacy non-sk tokens
 
   const withEnv = resolveDeepSeekKey({ env: { ...env, DEEPSEEK_API_KEY: "sk-env" } });
   assert.deepEqual(withEnv, { source: "$DEEPSEEK_API_KEY", apiKey: "sk-env" });
+});
+
+test("menuBarAppPath resolves via env override or repo-relative layout", () => {
+  const moduleDir = join("some", "place", "bin");
+  assert.equal(
+    menuBarAppPath({ env: { CLAUDE_GO_MENU_BAR_APP: "/custom/App.app" }, moduleDir }),
+    "/custom/App.app",
+  );
+  // No .app on disk under some/place/../DeepSeekUsage -> null without override.
+  const saved = process.env.CLAUDE_GO_MENU_BAR_APP;
+  delete process.env.CLAUDE_GO_MENU_BAR_APP;
+  try {
+    assert.equal(menuBarAppPath({ env: {}, moduleDir }), null);
+  } finally {
+    if (saved != null) process.env.CLAUDE_GO_MENU_BAR_APP = saved;
+  }
+  // Repo layout: <dir>/../DeepSeekUsage/DeepSeekUsage.app exists.
+  const repoLayout = mkdtempSync(join(tmpdir(), "claude-go-app-"));
+  try {
+    mkdirSync(join(repoLayout, "DeepSeekUsage", "DeepSeekUsage.app"), { recursive: true });
+    const found = menuBarAppPath({
+      env: {},
+      moduleDir: join(repoLayout, "claude-go"),
+    });
+    assert.equal(found, join(repoLayout, "DeepSeekUsage", "DeepSeekUsage.app"));
+  } finally {
+    rmSync(repoLayout, { recursive: true, force: true });
+  }
 });
 
 test("fetchBalance parses a mocked /user/balance response", async (t) => {

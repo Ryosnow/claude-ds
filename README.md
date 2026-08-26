@@ -78,6 +78,7 @@ claude-go -p "解释这个项目"   # 其余参数原样透传给 claude
 ```sh
 claude-go balance        # 终端打印 DeepSeek 账户余额
 claude-go balance --raw  # 原始 JSON
+claude-go restart        # 重启 macOS 菜单栏余额 App
 ```
 
 Key 自动读取 `DEEPSEEK_API_KEY` 或 `~/.config/deepseek/api_key`。菜单栏常驻版见 [DeepSeekUsage/](DeepSeekUsage/)（`./build.sh` 构建）。
